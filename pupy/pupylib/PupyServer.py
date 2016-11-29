@@ -23,6 +23,7 @@ from .PupyErrors import PupyModuleExit, PupyModuleError
 from .PupyJob import PupyJob
 from .PupyCategories import PupyCategories
 from .PupyConfig import PupyConfig
+from .PupyService import PupyBindService
 from network.conf import transports
 from network.lib.connection import PupyConnectionThread
 from pupylib.utils.rpyc_utils import obtain
@@ -273,7 +274,7 @@ class PupyServer(threading.Thread):
         self.handler.display_success("Connected. Starting session")
         bgsrv=PupyConnectionThread(
             self,
-            PupyService.PupyBindService,
+            PupyBindService,
             rpyc.Channel(stream),
             config={
                 'connid': launcher.args.host
@@ -327,3 +328,4 @@ class PupyServer(threading.Thread):
     def stop(self):
         if self.server:
             self.server.close()
+        self.finished.set()

@@ -25,7 +25,6 @@ class ShellExec(PupyModule):
                     output.write(log)
         else:
             try:
-                self.client.load_package("psutil")
                 self.client.load_package("pupwinutils.processes")
                 p=self.client.conn.modules['pupwinutils.processes'].start_hidden_process(args.argument)
                 pid=p.pid

@@ -12,3 +12,5 @@ netifaces
 m2crypto
 pylzma
 mss
+colorama
+pyOpenSSL

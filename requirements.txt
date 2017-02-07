@@ -2,9 +2,16 @@ rpyc
 pycrypto
 pefile 
 pyyaml
-image
 rsa
 netaddr
 ecdsa==0.13
 paramiko==2.0.2
+tinyec
+uptime
 netifaces
+m2crypto
+pylzma
+mss
+colorama
+pyOpenSSL
+scapy

